@@ -1,144 +1,171 @@
-########################################################################################################################
-# IMPORTS
-# You absolutely need these
-import mlflow
 import os
 
-# You will probably need these
-import pandas as pd
-import numpy as np
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-import skops.io as sio
-
-# This are for example purposes. You may discard them if you don't use them.
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
+import mlflow
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import TimeSeriesSplit
-
-### TODO -> HERE YOU CAN ADD ANY OTHER LIBRARIES YOU MAY NEED ###
-
-########################################################################################################################
-
-## Step 1: The Data (from CSVs)
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 def read_csv_with_time_index(path):
-    """Helper to read CSVs with a datetime index."""
+    """Read a CSV file and use time as its index."""
     df = pd.read_csv(path, parse_dates=["time"], index_col="time")
-    df.index = pd.to_datetime(df.index)
     df.sort_index(inplace=True)
     return df
 
-def create_eda_plots(joined_dfs):
-    """
-    Create exploratory data analysis plots for wind power data
-    """
-    fig, ax = plt.subplots(1,3, figsize=(25,4))
 
-    # Speed and Power for the last 7 days
-    ax[0].plot(joined_dfs["Speed"].tail(int(7*24/3)), label="Speed", color="blue")
-    ax[0].plot(joined_dfs["Total"].tail(int(7*24/3)), label="Power", color="tab:red")
+def create_eda_plots(joined_dfs):
+    """Create the three plots used in the notebook."""
+    fig, ax = plt.subplots(1, 3, figsize=(25, 4))
+
+    ax[0].plot(joined_dfs["Speed"].tail(7 * 8), label="Speed", color="blue")
+    ax[0].plot(joined_dfs["Total"].tail(7 * 8), label="Power", color="tab:red")
     ax[0].set_title("Windspeed & Power Generation over last 7 days")
-    ax[0].set_xlabel("Time")
-    ax[0].tick_params(axis='x', labelrotation = 45)
-    ax[0].set_ylabel("Windspeed [m/s], Power [MW]")
+    ax[0].tick_params(axis="x", labelrotation=45)
     ax[0].legend()
 
-    # Speed vs Total (Power Curve nature)
     ax[1].scatter(joined_dfs["Speed"], joined_dfs["Total"])
-    power_curve = joined_dfs.groupby("Speed").median(numeric_only=True)["Total"]
-    ax[1].plot(power_curve.index, power_curve.values, "k:", label="Power Curve")
-    ax[1].legend()
     ax[1].set_title("Windspeed vs Power")
-    ax[1].set_ylabel("Power [MW]")
     ax[1].set_xlabel("Windspeed [m/s]")
+    ax[1].set_ylabel("Power [MW]")
 
-    # Speed and Power per Wind Direction
-    if "Direction" in joined_dfs.columns:
-        wind_grouped_by_direction = joined_dfs.groupby("Direction").mean(numeric_only=True).reset_index()
-        bar_width = 0.5
-        x = np.arange(len(wind_grouped_by_direction.index))
-        ax[2].bar(x, wind_grouped_by_direction.Total, width=0.5, label="Power", color="tab:red")
-        ax[2].bar(x + bar_width, wind_grouped_by_direction.Speed, width=0.5, label="Speed", color="blue")
-        ax[2].legend()
-        ax[2].set_xticks(x)
-        ax[2].set_xticklabels(wind_grouped_by_direction.Direction)
-        ax[2].tick_params(axis='x', labelrotation = 45)
-        ax[2].set_title("Speed and Power per Direction")
-    else:
-        ax[2].axis("off")
+    direction_data = joined_dfs.groupby("Direction").mean(numeric_only=True).reset_index()
+    ax[2].bar(direction_data["Direction"], direction_data["Total"])
+    ax[2].set_title("Power per Wind Direction")
+    ax[2].tick_params(axis="x", labelrotation=45)
 
     plt.tight_layout()
     return fig
 
-# Enable autologging for scikit-learn
+
+# Connect to the local MLflow server.
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+mlflow.set_experiment("Orkney Wind Power")
 mlflow.sklearn.autolog()
 
-mlflow.set_tracking_uri("http://127.0.0.1:5000") # We set the MLFlow UI to display in our local host.
+# MLflow Projects creates an outer run. We create separate runs for our models.
+os.environ.pop("MLFLOW_RUN_ID", None)
 
-mlflow.set_experiment("template-model")
+print("Loading data")
 
-# Start a run
-with mlflow.start_run(run_name="LinearRegression"):
+power_df = read_csv_with_time_index("data/power.csv")
+wind_df = read_csv_with_time_index("data/weather.csv")
+future_df = read_csv_with_time_index("data/future.csv")
 
-    print("Loading data")
+# Keep the target column and the two weather features used by the model.
+power_df = power_df[["Total"]]
+wind_df = wind_df.drop(columns=["Lead_hours", "Source_time"])
 
-    # --- Load from CSVs ---
-    power_df = read_csv_with_time_index("data/power.csv")
-    wind_df = read_csv_with_time_index("data/weather.csv")
+# Resample power to the same 3-hour interval as the weather data.
+power_3h = power_df.resample("3h").mean()
+joined_dfs = wind_df.join(power_3h, how="left")
+joined_dfs = joined_dfs.dropna(subset=["Total"])
 
-    print("Starting preprocessing")
+os.makedirs("plots", exist_ok=True)
+eda_figure = create_eda_plots(joined_dfs)
+eda_figure.savefig("plots/eda_plots.png")
+plt.close(eda_figure)
 
-    # --- Join datasets (as before) ---
-    joined_dfs = power_df.join(wind_df, how="inner").dropna(subset=["Total", "Speed"])
+# Create the preprocessing pipeline.
+numeric_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
 
-    # --- Create and save EDA plots ---
-    os.makedirs("plots", exist_ok=True)
-    eda_fig = create_eda_plots(joined_dfs)
-    eda_fig.savefig("plots/eda_plots.png")
-    mlflow.log_artifact("plots/eda_plots.png")
-    plt.close(eda_fig)
+direction_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore"))
+])
 
-    # --- Model section (same as before) ---
-    def load_and_predict_model(model_name, model_version, new_data):
-        model = mlflow.pyfunc.load_model(model_uri=f"models:/{model_name}/{model_version}")
-        return model.predict(new_data)
+preprocessor = ColumnTransformer([
+    ("speed", numeric_transformer, ["Speed"]),
+    ("direction", direction_transformer, ["Direction"])
+])
 
-    X = joined_dfs[["Speed"]]
-    y = joined_dfs["Total"]
+# Make a chronological train and test split.
+X = joined_dfs[["Speed", "Direction"]]
+y = joined_dfs["Total"]
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y)
+split_index = int(len(joined_dfs) * 0.8)
+X_train = X.iloc[:split_index]
+X_test = X.iloc[split_index:]
+y_train = y.iloc[:split_index]
+y_test = y.iloc[split_index:]
 
-    pipeline = Pipeline([
-        ('scaler', StandardScaler()),
-        ('regressor', LinearRegression())
+models = {
+    "Linear Regression": LinearRegression(),
+    "Random Forest": RandomForestRegressor(
+        n_estimators=100,
+        max_depth=10,
+        random_state=42
+    )
+}
+
+results = []
+best_mae = np.inf
+best_model_name = None
+best_pipeline = None
+
+for model_name, model in models.items():
+    current_pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("model", model)
     ])
 
-    print("Starting training")
+    with mlflow.start_run(run_name=model_name):
+        print(f"Training {model_name}")
 
-    # Train and evaluate model
-    pipeline.fit(X_train, y_train)
-    predictions = pipeline.predict(X_test)
+        current_pipeline.fit(X_train, y_train)
+        predictions = current_pipeline.predict(X_test)
 
-    # Plot predictions
-    plt.figure(figsize=(15, 4))
-    plt.plot(np.arange(len(predictions)), predictions, label="Predictions")
-    plt.plot(np.arange(len(y_test)), y_test, label="Truth")
-    plt.legend()
-    plt.savefig(f"plots/predictions.png")
-    plt.close()
-    mlflow.log_artifact(f"plots/predictions.png")
+        mae = mean_absolute_error(y_test, predictions)
+        rmse = np.sqrt(mean_squared_error(y_test, predictions))
+        r2 = r2_score(y_test, predictions)
 
-    # No need to manually log metrics - autologging handles:
-    # - Parameters
-    # - Metrics (R², MSE, MAE)
-    # - Model artifacts
-    # - Model signature
-    # - Feature importance (for supported models)
+        mlflow.log_metrics({"MAE": mae, "RMSE": rmse, "R2": r2})
+        mlflow.log_artifact("plots/eda_plots.png")
 
+        prediction_file = f"plots/{model_name.replace(' ', '_').lower()}_predictions.png"
+        plt.figure(figsize=(15, 4))
+        plt.plot(y_test.index, y_test, label="Truth")
+        plt.plot(y_test.index, predictions, label="Predictions")
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(prediction_file)
+        plt.close()
+        mlflow.log_artifact(prediction_file)
 
-    
+        results.append({
+            "Model": model_name,
+            "MAE": mae,
+            "RMSE": rmse,
+            "R2": r2
+        })
 
-########################################################################################################################
+        if mae < best_mae:
+            best_mae = mae
+            best_model_name = model_name
+            best_pipeline = current_pipeline
+
+results_df = pd.DataFrame(results).sort_values("MAE")
+print("\nModel comparison")
+print(results_df)
+print(f"\nBest model: {best_model_name}")
+
+# Use the best model to predict the future weather data.
+X_future = future_df[["Speed", "Direction"]]
+future_predictions = best_pipeline.predict(X_future)
+
+predictions_df = future_df[["Speed", "Direction"]].copy()
+predictions_df["Predicted_Power"] = future_predictions
+predictions_df.to_csv("plots/future_predictions.csv")
+
+print("\nFirst 10 future predictions")
+print(predictions_df.head(10))

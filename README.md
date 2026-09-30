@@ -102,3 +102,44 @@ Your submission will be evaluated based on:
 * Clarity and depth of reflection in the report
 
 Model accuracy alone is *not* a grading criterion.
+
+## Running the project
+
+Install the dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Start the MLflow server in the first terminal:
+
+```powershell
+python -m mlflow server --host 127.0.0.1 --port 5000
+```
+OBS: I had to put python -m on mine, in theory it should work without it
+
+Run the Python script in a second terminal:
+
+```powershell
+python -m mlflow run . --env-manager local
+```
+
+The script trains Linear Regression and Random Forest models, logs their metrics and plots, and writes the future predictions to `plots/future_predictions.csv`.
+
+## Serving the registered model
+
+The selected model is registered as `OrkneyWindPowerModel`. Keep the tracking server running on port 5000 and serve version 1 on port 5001:
+
+```powershell
+$env:MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
+python -m mlflow models serve -m "models:/OrkneyWindPowerModel/1" --env-manager local --host 127.0.0.1 --port 5001
+```
+
+In a third terminal, send weather data to the prediction endpoint:
+
+```powershell
+$body = '{"dataframe_records":[{"Speed":15.19936,"Direction":"SE"}]}'
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5001/invocations -ContentType application/json -Body $body
+```
+
+Save a screenshot of the successful response for the report. If a later model version is registered, replace `/1` in the serving command with that version number.
